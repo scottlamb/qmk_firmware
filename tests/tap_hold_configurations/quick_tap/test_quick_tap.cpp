@@ -208,3 +208,62 @@ TEST_F(QuickTap, tap_key_and_hold_again_after_quick_tap_term) {
     run_one_scan_loop();
     VERIFY_AND_CLEAR(driver);
 }
+
+/* Regression test for the tap-hold state machine: once a mod-tap key has
+ * entered quick-tap auto-repeat (tap, release, press-and-hold within
+ * QUICK_TAP_TERM), pressing another tap-hold key must NOT cause the held tap
+ * keycode to be unregistered from the HID report. Previously, the
+ * "Start new tap with releasing last tap(>1)" branch in process_tapping
+ * synthesized a release of the still-physically-held key, which left the
+ * report in an inconsistent state and made the bug visually identical to a
+ * cancelled OS-level auto-repeat. */
+TEST_F(QuickTap, quick_tap_held_key_not_released_when_other_tap_hold_pressed) {
+    TestDriver driver;
+    InSequence s;
+    auto       mod_tap_key_j = KeymapKey(0, 1, 0, SFT_T(KC_J));
+    auto       mod_tap_key_a = KeymapKey(0, 2, 0, CTL_T(KC_A));
+
+    set_keymap({mod_tap_key_j, mod_tap_key_a});
+
+    /* Press j (mod-tap). */
+    EXPECT_NO_REPORT(driver);
+    mod_tap_key_j.press();
+    run_one_scan_loop();
+    VERIFY_AND_CLEAR(driver);
+
+    /* Release j: sends KC_J as a tap. */
+    EXPECT_REPORT(driver, (KC_J));
+    EXPECT_EMPTY_REPORT(driver);
+    mod_tap_key_j.release();
+    idle_for(QUICK_TAP_TERM - 10);
+    VERIFY_AND_CLEAR(driver);
+
+    /* Press j again within QUICK_TAP_TERM: enters quick-tap auto-repeat
+     * (KC_J registered; host will auto-repeat). */
+    EXPECT_REPORT(driver, (KC_J));
+    mod_tap_key_j.press();
+    run_one_scan_loop();
+    VERIFY_AND_CLEAR(driver);
+
+    /* Press a (another tap-hold key). Critically, this MUST NOT cause KC_J
+     * to be released — that would interrupt the host's auto-repeat. Before
+     * the fix, KC_J would be unregistered here. */
+    EXPECT_NO_REPORT(driver);
+    mod_tap_key_a.press();
+    run_one_scan_loop();
+    VERIFY_AND_CLEAR(driver);
+
+    /* Release a within its own tapping term: sends KC_A as a tap. KC_J must
+     * remain held throughout. */
+    EXPECT_REPORT(driver, (KC_J, KC_A));
+    EXPECT_REPORT(driver, (KC_J));
+    mod_tap_key_a.release();
+    run_one_scan_loop();
+    VERIFY_AND_CLEAR(driver);
+
+    /* Finally, release j. Now KC_J is unregistered. */
+    EXPECT_EMPTY_REPORT(driver);
+    mod_tap_key_j.release();
+    run_one_scan_loop();
+    VERIFY_AND_CLEAR(driver);
+}

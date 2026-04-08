@@ -432,6 +432,10 @@ With default settings, `a` will be sent on the first release, then `a` will be s
 
 With `QUICK_TAP_TERM` configured, the timing between `SFT_T(KC_A)` up and `SFT_T(KC_A)` down must be within `QUICK_TAP_TERM` to trigger auto-repeat. Otherwise, the second press will be sent as a Shift. If `QUICK_TAP_TERM` is set to `0`, the second press will always be sent as a Shift, effectively disabling auto-repeat.
 
+Once auto-repeat has been triggered, the held tap keycode remains in the HID report until the dual-role key is physically released, even if other tap-hold keys are pressed in the meantime. Applications that observe raw key events (e.g. browsers via `keydown`/`keyup`, games, accessibility tools) will correctly see the original key as continuously held throughout — this matters for web typing tests and any UI that tracks held-key state.
+
+Note that this only governs what the firmware sends. The host operating system's typematic auto-repeat is single-key, so visible character repetition in a normal text field will still cease when another key is pressed and will not resume on its release.
+
 ::: warning
 `QUICK_TAP_TERM` timing will also impact anything that uses tapping toggles (Such as the `TT` layer keycode, and the One Shot Tap Toggle).
 :::

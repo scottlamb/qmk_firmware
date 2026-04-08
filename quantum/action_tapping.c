@@ -68,9 +68,11 @@ static uint8_t           speculative_mods                        = 0;
 static void speculative_key_press(keyrecord_t *record);
 #    endif // SPECULATIVE_HOLD
 
-#    if defined(CHORDAL_HOLD) || defined(FLOW_TAP_TERM)
+#    if defined(CHORDAL_HOLD) || defined(FLOW_TAP_TERM) || (QUICK_TAP_TERM != 0)
 #        define REGISTERED_TAPS_SIZE 8
 // Array of tap-hold keys that have been settled as tapped but not yet released.
+// Used by CHORDAL_HOLD, FLOW_TAP_TERM, and the quick-tap auto-repeat preservation
+// logic in process_tapping().
 static keypos_t registered_taps[REGISTERED_TAPS_SIZE] = {};
 static uint8_t  num_registered_taps                   = 0;
 
@@ -82,7 +84,9 @@ static int8_t registered_tap_find(keypos_t key);
 static void registered_taps_del_index(uint8_t i);
 /** Logs the registered_taps array for debugging. */
 static void debug_registered_taps(void);
+#    endif // REGISTERED_TAPS_SIZE
 
+#    if defined(CHORDAL_HOLD) || defined(FLOW_TAP_TERM)
 static bool is_mt_or_lt(uint16_t keycode) {
     return IS_QK_MOD_TAP(keycode) || IS_QK_LAYER_TAP(keycode);
 }
@@ -253,19 +257,21 @@ void action_tapping_process(keyrecord_t record) {
 bool process_tapping(keyrecord_t *keyp) {
     const keyevent_t event = keyp->event;
 
-#    if defined(CHORDAL_HOLD) || defined(FLOW_TAP_TERM)
+#    if defined(REGISTERED_TAPS_SIZE)
     if (!event.pressed) {
         const int8_t i = registered_tap_find(event.key);
         if (i != -1) {
             // If a tap-hold key was previously settled as tapped, set its
-            // tap.count correspondingly on release.
+            // tap.count correspondingly on release. This handles releases of
+            // keys settled by CHORDAL_HOLD, FLOW_TAP_TERM, and the quick-tap
+            // auto-repeat preservation logic below.
             keyp->tap.count = 1;
             registered_taps_del_index(i);
             ac_dprintf("Found tap release for [%d]\n", i);
             debug_registered_taps();
         }
     }
-#    endif // defined(CHORDAL_HOLD) || defined(FLOW_TAP_TERM)
+#    endif // REGISTERED_TAPS_SIZE
 
     // state machine is in the "reset" state, no tapping key is to be
     // processed
@@ -511,22 +517,7 @@ bool process_tapping(keyrecord_t *keyp) {
                     debug_tapping_key();
                     return true;
                 } else if (is_tap_record(keyp) && event.pressed) {
-                    if (tapping_key.tap.count > 1) {
-                        ac_dprintf("Tapping: Start new tap with releasing last tap(>1).\n");
-                        // unregister key
-                        process_record(&(keyrecord_t){
-                            .tap           = tapping_key.tap,
-                            .event.key     = tapping_key.event.key,
-                            .event.time    = event.time,
-                            .event.pressed = false,
-                            .event.type    = tapping_key.event.type,
-#    ifdef COMBO_ENABLE
-                            .keycode = tapping_key.keycode,
-#    endif
-                        });
-                    } else {
-                        ac_dprintf("Tapping: Start while last tap(1).\n");
-                    }
+                    ac_dprintf("Tapping: Start while last tap(1).\n");
                     tapping_key = *keyp;
                     waiting_buffer_scan_tap();
                     debug_tapping_key();
@@ -562,22 +553,7 @@ bool process_tapping(keyrecord_t *keyp) {
                     tapping_key = (keyrecord_t){0};
                     return true;
                 } else if (is_tap_record(keyp) && event.pressed) {
-                    if (tapping_key.tap.count > 1) {
-                        ac_dprintf("Tapping: Start new tap with releasing last timeout tap(>1).\n");
-                        // unregister key
-                        process_record(&(keyrecord_t){
-                            .tap           = tapping_key.tap,
-                            .event.key     = tapping_key.event.key,
-                            .event.time    = event.time,
-                            .event.pressed = false,
-                            .event.type    = tapping_key.event.type,
-#    ifdef COMBO_ENABLE
-                            .keycode = tapping_key.keycode,
-#    endif
-                        });
-                    } else {
-                        ac_dprintf("Tapping: Start while last timeout tap(1).\n");
-                    }
+                    ac_dprintf("Tapping: Start while last timeout tap(1).\n");
                     tapping_key = *keyp;
                     waiting_buffer_scan_tap();
                     debug_tapping_key();
@@ -600,12 +576,22 @@ bool process_tapping(keyrecord_t *keyp) {
             if (event.pressed) {
                 if (IS_TAPPING_RECORD(keyp)) {
                     if (WITHIN_QUICK_TAP_TERM(event) && !tapping_key.tap.interrupted && tapping_key.tap.count > 0) {
-                        // sequential tap.
-                        keyp->tap = tapping_key.tap;
-                        if (keyp->tap.count < 15) keyp->tap.count += 1;
-                        ac_dprintf("Tapping: Tap press(%u)\n", keyp->tap.count);
+                        // Quick-tap auto-repeat: re-press of a recently
+                        // tapped tap-hold key within QUICK_TAP_TERM. Settle
+                        // it as a tap immediately and remember it in
+                        // registered_taps so the eventual physical release
+                        // unregisters the tap keycode (see release-handling
+                        // block at the top of process_tapping()). Resetting
+                        // tapping_key here means subsequent events — whether
+                        // another tap-hold key or anything else — see a
+                        // clean state machine, instead of needing special
+                        // cases for tap.count > 1.
+                        keyp->tap.count = 1;
+                        ac_dprintf("Tapping: Quick-tap repeat, settling as tap.\n");
                         process_record(keyp);
-                        tapping_key = *keyp;
+                        registered_taps_add(keyp->event.key);
+                        debug_registered_taps();
+                        tapping_key = (keyrecord_t){0};
                         debug_tapping_key();
                         return true;
                     }
@@ -879,7 +865,7 @@ void speculative_key_settled(keyrecord_t *record) {
 }
 #    endif // SPECULATIVE_HOLD
 
-#    if defined(CHORDAL_HOLD) || defined(FLOW_TAP_TERM)
+#    if defined(REGISTERED_TAPS_SIZE)
 static void registered_taps_add(keypos_t key) {
     if (num_registered_taps >= REGISTERED_TAPS_SIZE) {
         ac_dprintf("TAPS OVERFLOW: CLEAR ALL STATES\n");
@@ -916,8 +902,7 @@ static void debug_registered_taps(void) {
     }
     ac_dprintf("}\n");
 }
-
-#    endif // defined(CHORDAL_HOLD) || defined(FLOW_TAP_TERM)
+#    endif // REGISTERED_TAPS_SIZE
 
 #    ifdef CHORDAL_HOLD
 __attribute__((weak)) bool get_chordal_hold(uint16_t tap_hold_keycode, keyrecord_t *tap_hold_record, uint16_t other_keycode, keyrecord_t *other_record) {
